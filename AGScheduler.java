@@ -4,21 +4,19 @@ class AGScheduler {
 
     public SchedulerResult run(List<Process> processes) {
         List<Process> procs = copyProcesses(processes);
-        List<String> execution = new ArrayList<>();
+        List<String> executionOrder = new ArrayList<>();
 
         LinkedList<Process> ready = new LinkedList<>();
-        Set<Process> inQueue = new HashSet<>();
-
         int time = 0;
-        int completed = 0;
-        int n = procs.size();
 
-        while (completed < n) {
-            // Add newly arrived processes
+        while (procs.stream().anyMatch(p -> p.getRemainingBurstTime() > 0)) {
+
+            // enqueue arrived, unfinished processes
             for (Process p : procs) {
-                if (p.getArrivalTime() == time && p.getRemainingTime() > 0 && !inQueue.contains(p)) {
+                if (p.getArrivalTime() <= time &&
+                        p.getRemainingBurstTime() > 0 &&
+                        !ready.contains(p)) {
                     ready.add(p);
-                    inQueue.add(p);
                 }
             }
 
@@ -27,139 +25,118 @@ class AGScheduler {
                 continue;
             }
 
-            // Get next process from ready queue
             Process current = ready.poll();
-            inQueue.remove(current);
+            executionOrder.add(current.getName());
 
-            int quantum = current.getQuantum();
-            int fcfsPhase = (int) Math.ceil(quantum * 0.25);
-            int priorityPhase = (int) Math.ceil(quantum * 0.25);
-            int sjfPhase = quantum - fcfsPhase - priorityPhase;
-
-            int executed = 0;
-            boolean preempted = false;
-            boolean completed_job = false;
-
-            // Phase 1: FCFS (non-preemptive)
-            while (executed < fcfsPhase && current.getRemainingTime() > 0) {
-                execution.add(current.getName());
-                current.setRemainingTime(current.getRemainingTime() - 1);
-                executed++;
-                time++;
-
-                // Add arrivals
-                for (Process p : procs) {
-                    if (p.getArrivalTime() == time && p.getRemainingTime() > 0 && !inQueue.contains(p)) {
-                        ready.add(p);
-                        inQueue.add(p);
-                    }
-                }
-            }
-
-            if (current.getRemainingTime() == 0) {
-                current.setCompletionTime(time);
-                current.setQuantum(0);
-                completed++;
-                continue;
-            }
-
-            // Phase 2: Non-preemptive Priority (but can be preempted by higher priority NEW arrivals)
-            while (executed < fcfsPhase + priorityPhase && current.getRemainingTime() > 0 && !preempted) {
-                // Check if higher priority process just arrived
-                Process highestPriority = null;
-                for (Process p : ready) {
-                    if (p.getPriority() < current.getPriority()) {
-                        if (highestPriority == null || p.getPriority() < highestPriority.getPriority()) {
-                            highestPriority = p;
-                        }
-                    }
-                }
-
-                if (highestPriority != null) {
-                    // Scenario ii: Preempted in priority phase
-                    int remaining = quantum - executed;
-                    current.setQuantum(current.getQuantum() + (int) Math.ceil(remaining / 2.0));
-                    ready.addFirst(current);
-                    inQueue.add(current);
-                    preempted = true;
-                    break;
-                }
-
-                execution.add(current.getName());
-                current.setRemainingTime(current.getRemainingTime() - 1);
-                executed++;
-                time++;
-
-                // Add arrivals
-                for (Process p : procs) {
-                    if (p.getArrivalTime() == time && p.getRemainingTime() > 0 && !inQueue.contains(p)) {
-                        ready.add(p);
-                        inQueue.add(p);
-                    }
-                }
-            }
-
-            if (preempted) continue;
-
-            if (current.getRemainingTime() == 0) {
-                current.setCompletionTime(time);
-                current.setQuantum(0);
-                completed++;
-                continue;
-            }
-
-            // Phase 3: Preemptive SJF
-            while (executed < quantum && current.getRemainingTime() > 0 && !preempted) {
-                // Check for shorter job
-                Process shortest = null;
-                for (Process p : ready) {
-                    if (p.getRemainingTime() < current.getRemainingTime()) {
-                        if (shortest == null || p.getRemainingTime() < shortest.getRemainingTime()) {
-                            shortest = p;
-                        }
-                    }
-                }
-
-                if (shortest != null) {
-                    // Scenario iii: Preempted by shorter job
-                    int remaining = quantum - executed;
-                    current.setQuantum(current.getQuantum() + remaining);
-                    ready.add(current);
-                    inQueue.add(current);
-                    preempted = true;
-                    break;
-                }
-
-                execution.add(current.getName());
-                current.setRemainingTime(current.getRemainingTime() - 1);
-                executed++;
-                time++;
-
-                // Add arrivals
-                for (Process p : procs) {
-                    if (p.getArrivalTime() == time && p.getRemainingTime() > 0 && !inQueue.contains(p)) {
-                        ready.add(p);
-                        inQueue.add(p);
-                    }
-                }
-            }
-
-            if (preempted) continue;
-
-            if (current.getRemainingTime() == 0) {
-                // Scenario iv: Job completed
-                current.setCompletionTime(time);
-                current.setQuantum(0);
-                completed++;
-            } else if (executed >= quantum) {
-                // Scenario i: Used all quantum
-                current.setQuantum(current.getQuantum() + 2);
+            // scenario (i) at start of cycle
+            if (current.getRemainingQuantum() <= 0 &&
+                    current.getRemainingBurstTime() > 0) {
+                int newQ = current.getQuantum() + 2;
+                current.setQuantum(newQ);
+                current.setRemainingQuantum(newQ);
                 ready.add(current);
-                inQueue.add(current);
+                continue;
+            }
+
+            int q = current.getQuantum();
+            int rq = current.getRemainingQuantum();
+            int fcfsPart = (int) Math.ceil(q * 0.25);
+            int prioPart = (int) Math.ceil(q * 0.25);
+
+            // ===== FCFS phase =====
+            int fcfsTime = Math.min(fcfsPart, rq);
+            time = runFor(current, fcfsTime, time, procs, ready);
+            rq = current.getRemainingQuantum();
+
+            if (current.getRemainingBurstTime() == 0) {
+                current.setCompletionTime(time);
+                current.setQuantum(0);          // scenario (iv)
+                current.setRemainingQuantum(0);
+                continue;
+            }
+
+            // ===== Priority phase =====
+            int prioTime = Math.min(prioPart, rq);
+            Process highest = highestPriorityProcess(procs, time);
+
+            if (highest != null && highest.getName().equals(current.getName())) {
+                // still highest priority → execute priority chunk
+                time = runFor(current, prioTime, time, procs, ready);
+                rq = current.getRemainingQuantum();
+
+                if (current.getRemainingBurstTime() == 0) {
+                    current.setCompletionTime(time);
+                    current.setQuantum(0);      // scenario (iv)
+                    current.setRemainingQuantum(0);
+                    continue;
+                }
+
+                if (rq <= 0 && current.getRemainingBurstTime() > 0) {
+                    // scenario (i): used all quantum
+                    int newQ = current.getQuantum() + 2;
+                    current.setQuantum(newQ);
+                    current.setRemainingQuantum(newQ);
+                    ready.add(current);
+                    continue;
+                }
+
+                // ===== SJF phase =====
+                Process shortest = shortestProcess(procs, time);
+
+                if (shortest != null &&
+                        (shortest.getName().equals(current.getName()) ||
+                                shortest.getRemainingBurstTime() == current.getRemainingBurstTime())) {
+
+                    // still shortest: run whole remaining quantum
+                    int runTime = current.getRemainingQuantum();
+                    time = runFor(current, runTime, time, procs, ready);
+
+                    if (current.getRemainingBurstTime() == 0) {
+                        current.setCompletionTime(time);
+                        current.setQuantum(0);  // scenario (iv)
+                        current.setRemainingQuantum(0);
+                        continue;
+                    }
+
+                    if (current.getRemainingQuantum() <= 0 &&
+                            current.getRemainingBurstTime() > 0) {
+                        // scenario (i)
+                        int newQ = current.getQuantum() + 2;
+                        current.setQuantum(newQ);
+                        current.setRemainingQuantum(newQ);
+                        ready.add(current);
+                    }
+
+                } else {
+                    // different shortest job exists → scenario (iii)
+                    int add = current.getRemainingQuantum();
+                    int newQ = current.getQuantum() + add;
+                    current.setQuantum(newQ);
+                    current.setRemainingQuantum(newQ);
+                    ready.add(current);
+
+                    if (shortest != null && ready.contains(shortest)) {
+                        ready.remove(shortest);
+                        ready.addFirst(shortest);
+                    }
+                }
+
+            } else {
+                // lost highest priority → scenario (ii)
+                int add = (int) Math.ceil(current.getRemainingQuantum() / 2.0);
+                int newQ = current.getQuantum() + add;
+                current.setQuantum(newQ);
+                current.setRemainingQuantum(newQ);
+                ready.add(current);
+
+                if (highest != null && ready.contains(highest)) {
+                    ready.remove(highest);
+                    ready.addFirst(highest);
+                }
             }
         }
 
-        // Calculate metrics
+        // metrics
         for (Process p : procs) {
             int tat = p.getCompletionTime() - p.getArrivalTime();
             int wt = tat - p.getBurstTime();
@@ -167,14 +144,67 @@ class AGScheduler {
             p.setWaitingTime(wt);
         }
 
-        return new SchedulerResult(execution, procs);
+        return new SchedulerResult(executionOrder, procs);
+    }
+
+    // run current for up to 't' time units (respecting remainingQuantum and remainingBurstTime)
+    private int runFor(Process cur, int t, int time,
+                       List<Process> procs, LinkedList<Process> ready) {
+        int run = Math.min(t, cur.getRemainingQuantum());
+        for (int i = 0; i < run && cur.getRemainingBurstTime() > 0; i++) {
+            cur.setRemainingBurstTime(cur.getRemainingBurstTime() - 1);
+            cur.setRemainingQuantum(cur.getRemainingQuantum() - 1);
+            time++;
+            for (Process p : procs) {
+                if (p.getArrivalTime() == time &&
+                        p.getRemainingBurstTime() > 0 &&
+                        !ready.contains(p) &&
+                        p != cur) {
+                    ready.add(p);
+                }
+            }
+        }
+        return time;
+    }
+
+    private Process highestPriorityProcess(List<Process> procs, int time) {
+        Process best = null;
+        for (Process p : procs) {
+            if (p.getArrivalTime() <= time && p.getRemainingBurstTime() > 0) {
+                if (best == null ||
+                        p.getPriority() < best.getPriority() ||
+                        (p.getPriority() == best.getPriority() &&
+                                p.getArrivalTime() < best.getArrivalTime())) {
+                    best = p;
+                }
+            }
+        }
+        return best;
+    }
+
+    private Process shortestProcess(List<Process> procs, int time) {
+        Process best = null;
+        for (Process p : procs) {
+            if (p.getArrivalTime() <= time && p.getRemainingBurstTime() > 0) {
+                if (best == null ||
+                        p.getRemainingBurstTime() < best.getRemainingBurstTime()) {
+                    best = p;
+                }
+            }
+        }
+        return best;
     }
 
     private List<Process> copyProcesses(List<Process> original) {
         List<Process> res = new ArrayList<>();
         for (Process p : original) {
-            res.add(new Process(p.getName(), p.getArrivalTime(),
-                    p.getBurstTime(), p.getPriority(), p.getQuantum()));
+            res.add(new Process(
+                    p.getName(),
+                    p.getArrivalTime(),
+                    p.getBurstTime(),
+                    p.getPriority(),
+                    p.getQuantum()
+            ));
         }
         return res;
     }
